@@ -10,6 +10,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.util.Log
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
@@ -17,9 +18,13 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.viewinterop.AndroidView
@@ -30,6 +35,7 @@ private const val TAG = "SettleCameraPreview"
 
 class CameraController {
   internal var imageCapture: ImageCapture? = null
+  internal var camera: Camera? = null
 
   fun takePicture(context: Context, onCapture: (Bitmap) -> Unit, onError: (Throwable) -> Unit) {
     val capture = imageCapture ?: run {
@@ -57,6 +63,19 @@ class CameraController {
       },
     )
   }
+
+  /**
+   * Multiply the current zoom ratio by [pinchScale] (the relative scale change reported by
+   * Compose's transform-gesture detector — 1.0 means no change). Result is clamped to the lens's
+   * supported range.
+   */
+  fun applyPinchZoom(pinchScale: Float) {
+    val cam = camera ?: return
+    val zoomState = cam.cameraInfo.zoomState.value ?: return
+    val target =
+      (zoomState.zoomRatio * pinchScale).coerceIn(zoomState.minZoomRatio, zoomState.maxZoomRatio)
+    cam.cameraControl.setZoomRatio(target)
+  }
 }
 
 @Composable
@@ -73,37 +92,45 @@ fun CameraPreview(modifier: Modifier = Modifier, controller: CameraController) {
     }
   }
 
-  AndroidView(
-    modifier = modifier,
-    factory = { previewView },
-    update = { view ->
-      val providerFuture = ProcessCameraProvider.getInstance(context)
-      providerFuture.addListener(
-        {
-          try {
-            val cameraProvider = providerFuture.get()
-            val preview =
-              Preview.Builder().build().also { it.setSurfaceProvider(view.surfaceProvider) }
-            val imageCapture =
-              ImageCapture.Builder()
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                .build()
-            controller.imageCapture = imageCapture
-            cameraProvider.unbindAll()
-            cameraProvider.bindToLifecycle(
-              lifecycleOwner,
-              CameraSelector.DEFAULT_BACK_CAMERA,
-              preview,
-              imageCapture,
-            )
-          } catch (e: Throwable) {
-            Log.e(TAG, "Camera bind failed", e)
-          }
-        },
-        ContextCompat.getMainExecutor(context),
-      )
-    },
-  )
+  Box(
+    modifier =
+      modifier.pointerInput(controller) {
+        detectTransformGestures { _, _, zoom, _ -> controller.applyPinchZoom(zoom) }
+      }
+  ) {
+    AndroidView(
+      modifier = Modifier.fillMaxSize(),
+      factory = { previewView },
+      update = { view ->
+        val providerFuture = ProcessCameraProvider.getInstance(context)
+        providerFuture.addListener(
+          {
+            try {
+              val cameraProvider = providerFuture.get()
+              val preview =
+                Preview.Builder().build().also { it.setSurfaceProvider(view.surfaceProvider) }
+              val imageCapture =
+                ImageCapture.Builder()
+                  .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                  .build()
+              controller.imageCapture = imageCapture
+              cameraProvider.unbindAll()
+              controller.camera =
+                cameraProvider.bindToLifecycle(
+                  lifecycleOwner,
+                  CameraSelector.DEFAULT_BACK_CAMERA,
+                  preview,
+                  imageCapture,
+                )
+            } catch (e: Throwable) {
+              Log.e(TAG, "Camera bind failed", e)
+            }
+          },
+          ContextCompat.getMainExecutor(context),
+        )
+      },
+    )
+  }
 }
 
 private fun ImageProxy.toRotatedBitmap(): Bitmap {
