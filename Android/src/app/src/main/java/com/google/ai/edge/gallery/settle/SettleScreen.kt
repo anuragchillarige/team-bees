@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -35,6 +36,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -47,10 +49,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-
 import androidx.core.content.ContextCompat
+import java.io.File
 
 private const val TAG = "SettleScreen"
+private const val MODEL_FILENAME = "gemma-4-E2B-it_qualcomm_sm8750.litertlm"
 
 @Composable
 fun SettleScreen() {
@@ -85,10 +88,30 @@ private fun CameraStage() {
   var capturedBitmap by remember { mutableStateOf<Bitmap?>(null) }
   var blocks by remember { mutableStateOf<List<SettleTextBlock>>(emptyList()) }
   var results by remember { mutableStateOf<List<ClauseResult>>(emptyList()) }
+  var classifying by remember { mutableStateOf(false) }
   var selectedClause by
     remember { mutableStateOf<Pair<SettleTextBlock, ClauseResult?>?>(null) }
   val controller = remember { CameraController() }
   val ocr = remember { OcrService() }
+  val analyzer = remember { SettleAnalyzer(context) }
+  var analyzerReady by remember { mutableStateOf(false) }
+
+  LaunchedEffect(Unit) {
+    val modelFile = File(context.getExternalFilesDir(null), "settle/$MODEL_FILENAME")
+    if (!modelFile.exists()) {
+      Log.w(TAG, "Model file missing at ${modelFile.absolutePath}; using keyword fallback only")
+      return@LaunchedEffect
+    }
+    try {
+      analyzer.initialize(modelFile.absolutePath)
+      analyzerReady = true
+      Log.i(TAG, "Analyzer ready")
+    } catch (e: Exception) {
+      Log.e(TAG, "Analyzer init failed", e)
+    }
+  }
+
+  DisposableEffect(Unit) { onDispose { analyzer.close() } }
 
   LaunchedEffect(capturedBitmap) {
     val bmp = capturedBitmap ?: return@LaunchedEffect
@@ -102,7 +125,15 @@ private fun CameraStage() {
   }
 
   LaunchedEffect(blocks) {
-    results = if (blocks.isEmpty()) emptyList() else KeywordClassifier.classify(blocks)
+    if (blocks.isEmpty()) {
+      results = emptyList()
+      classifying = false
+      return@LaunchedEffect
+    }
+    classifying = true
+    results =
+      if (analyzerReady) analyzer.classifyBlocks(blocks) else KeywordClassifier.classify(blocks)
+    classifying = false
   }
 
   Box(modifier = Modifier.fillMaxSize()) {
@@ -128,15 +159,17 @@ private fun CameraStage() {
         blocks = blocks,
         results = results,
         modifier = Modifier.fillMaxSize(),
-        onBlockTap = { block ->
-          selectedClause = block to resultById[block.id]
-        },
+        onBlockTap = { block -> selectedClause = block to resultById[block.id] },
       )
+      if (classifying) {
+        AnalyzingOverlay(modifier = Modifier.align(Alignment.Center))
+      }
       Button(
         onClick = {
           capturedBitmap = null
           blocks = emptyList()
           results = emptyList()
+          classifying = false
           selectedClause = null
         },
         modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 48.dp),
@@ -152,6 +185,25 @@ private fun CameraStage() {
       result = result,
       onDismiss = { selectedClause = null },
     )
+  }
+}
+
+@Composable
+private fun AnalyzingOverlay(modifier: Modifier = Modifier) {
+  Surface(
+    modifier = modifier.padding(24.dp),
+    shape = RoundedCornerShape(16.dp),
+    color = Color.Black.copy(alpha = 0.55f),
+    contentColor = Color.White,
+  ) {
+    Row(
+      modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(20.dp))
+      Spacer(Modifier.width(12.dp))
+      Text("Analyzing…", style = MaterialTheme.typography.bodyMedium)
+    }
   }
 }
 
