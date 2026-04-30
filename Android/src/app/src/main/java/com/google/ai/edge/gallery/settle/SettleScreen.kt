@@ -9,9 +9,9 @@ package com.google.ai.edge.gallery.settle
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,12 +28,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+
+private const val TAG = "SettleScreen"
 
 @Composable
 fun SettleScreen() {
@@ -66,7 +66,20 @@ fun SettleScreen() {
 private fun CameraStage() {
   val context = LocalContext.current
   var capturedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+  var blocks by remember { mutableStateOf<List<SettleTextBlock>>(emptyList()) }
   val controller = remember { CameraController() }
+  val ocr = remember { OcrService() }
+
+  LaunchedEffect(capturedBitmap) {
+    val bmp = capturedBitmap ?: return@LaunchedEffect
+    blocks =
+      try {
+        ocr.extractBlocks(bmp)
+      } catch (e: Exception) {
+        Log.e(TAG, "OCR failed", e)
+        emptyList()
+      }
+  }
 
   Box(modifier = Modifier.fillMaxSize()) {
     val bitmap = capturedBitmap
@@ -77,7 +90,7 @@ private fun CameraStage() {
           controller.takePicture(
             context = context,
             onCapture = { capturedBitmap = it },
-            onError = { /* TODO: surface error */ },
+            onError = { Log.e(TAG, "Capture failed", it) },
           )
         },
         modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 48.dp),
@@ -85,14 +98,16 @@ private fun CameraStage() {
         Text("Analyze")
       }
     } else {
-      Image(
-        bitmap = bitmap.asImageBitmap(),
-        contentDescription = "Captured document",
+      AnalyzedImage(
+        bitmap = bitmap,
+        blocks = blocks,
         modifier = Modifier.fillMaxSize(),
-        contentScale = ContentScale.Fit,
       )
       Button(
-        onClick = { capturedBitmap = null },
+        onClick = {
+          capturedBitmap = null
+          blocks = emptyList()
+        },
         modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 48.dp),
       ) {
         Text("Scan again")
