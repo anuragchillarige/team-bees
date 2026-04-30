@@ -66,6 +66,20 @@
           recreate the activity when UI mode changes (e.g. setting dark mode).
           Instead, just recompose the view.
          -->
+        <!-- Settle: launcher activity for the camera-based legal document scanner. -->
+        <activity
+            android:name="com.google.ai.edge.gallery.settle.SettleActivity"
+            android:exported="true"
+            android:label="Settle"
+            android:screenOrientation="portrait"
+            android:configChanges="uiMode|orientation|screenSize"
+            tools:ignore="DiscouragedApi,LockedOrientationActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
         <activity
             android:name="com.google.ai.edge.gallery.MainActivity"
             android:exported="true"
@@ -74,11 +88,12 @@
             android:windowSoftInputMode="adjustResize"
             android:configChanges="uiMode"
             tools:ignore="DiscouragedApi,LockedOrientationActivity">
-            <!-- This is for putting the app into launcher -->
+            <!-- Original launcher intent filter (commented out so it can be restored if needed):
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            -->
 
             <!-- This is for deep linking -->
             <intent-filter>
