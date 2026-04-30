@@ -67,7 +67,17 @@ class SettleAnalyzer(private val context: Context) {
 
   suspend fun classifyBlocks(blocks: List<SettleTextBlock>): List<ClauseResult> {
     if (blocks.isEmpty()) return emptyList()
-    val conv = conversation ?: return KeywordClassifier.classify(blocks)
+    val eng = engine ?: return KeywordClassifier.classify(blocks)
+    // Each scan starts a brand-new conversation so the model can't be biased by the JSON it
+    // returned for the previous document — that residual chat state was causing the LLM to echo
+    // the new clauses verbatim on the second and later scans.
+    val conv =
+      try {
+        resetConversation(eng)
+      } catch (e: Exception) {
+        Log.e(TAG, "resetConversation failed", e)
+        return KeywordClassifier.classify(blocks)
+      }
     val prompt = buildPrompt(blocks)
     return try {
       val raw = sendAndCollect(conv, prompt)
@@ -78,6 +88,25 @@ class SettleAnalyzer(private val context: Context) {
       KeywordClassifier.classify(blocks)
     }
   }
+
+  private suspend fun resetConversation(eng: Engine): Conversation =
+    withContext(Dispatchers.IO) {
+      try {
+        conversation?.close()
+      } catch (e: Throwable) {
+        Log.w(TAG, "old conversation close failed", e)
+      }
+      val fresh =
+        eng.createConversation(
+          ConversationConfig(
+            samplerConfig = null,
+            systemInstruction = null,
+            tools = emptyList(),
+          )
+        )
+      conversation = fresh
+      fresh
+    }
 
   private suspend fun sendAndCollect(conv: Conversation, prompt: String): String =
     suspendCancellableCoroutine { continuation ->
@@ -120,22 +149,37 @@ class SettleAnalyzer(private val context: Context) {
     val capped = blocks.take(25) // protect KV cache
     val numbered = capped.joinToString("\n") { "[${it.id}] ${it.text.replace("\n", " ").take(300)}" }
     return """
-You are a legal risk classifier. Classify each numbered clause from a contract or terms-of-service document.
+You are a careful legal-risk advisor. For each numbered clause, output an object with: id, risk, plain, why.
 
-Risk levels:
-- "red": binding arbitration, class action waivers, auto-renewal traps, large or unusual fees, broad liability waivers, indemnification clauses
-- "yellow": notice periods, security deposits, standard late fees, termination conditions
-- "green": routine boilerplate (definitions, governing law, severability, headings)
+ABSOLUTE RULE FOR "plain":
+The "plain" value MUST be your own paraphrase in everyday English. NEVER copy, quote, or echo the clause's wording. NEVER lightly reword it. If your "plain" sentence shares more than a couple of consecutive words with the original clause, you are violating this rule and must rewrite. Speak directly to the reader ("you ...") about what the clause actually does to them.
+
+WRONG (echoes the clause): clause = "Tenant agrees to binding arbitration and waives the right to a jury trial."  →  plain = "Tenant agrees to binding arbitration and waives the right to a jury t
+rial."
+WRONG (light reword):       clause = "Tenant agrees to binding arbitration and waives the right to a jury trial."  →  plain = "The tenant agrees to arbitration and waives jury trial rights."
+RIGHT (true paraphrase):    clause = "Tenant agrees to binding arbitration and waives the right to a jury trial."  →  plain = "You give up the right to take any dispute to court and must instead use a private arbitrator."
+
+Risk levels — judge in CONTEXT, keyword presence alone is NOT enough. Default to "green" unless the clause genuinely shifts rights, money, or obligations against the reader.
+- "red": materially harms the reader. Examples: mandatory binding arbitration combined with class-action waiver; perpetual or irrevocable license to reader's content; automatic renewal at a higher rate without clear opt-out; one-sided indemnification of the other party including their own negligence; broad release of liability; large or unusual fees and penalties.
+- "yellow": worth noticing but normal in scope. Examples: standard security deposit, written-notice requirements, late fees in normal range, ordinary termination conditions, capped liability limits.
+- "green": routine boilerplate (definitions, governing law, severability) OR clauses mentioning risky-sounding words that do not actually impose risk. Distinguish: "the parties may agree to arbitration" is GREEN; "binding arbitration is required" is RED.
+
+OUTPUT RULE (token-budget optimization — remove these two lines to re-enable green entries):
+OMIT any clause you would have classified as "green" from the JSON output. Only emit entries for "red" and "yellow". If nothing is red or yellow, return {"clauses":[]}.
+
+For "why": one sentence of ACTIONABLE guidance — what specifically should the reader check, ask, negotiate, or watch out for. For green clauses, write "Standard term, no action needed."
 
 Respond with ONLY valid JSON. No preamble, no markdown, no code fences. Schema:
-{"clauses":[{"id":<int>,"risk":"red|yellow|green","plain":"<one sentence>","why":"<one sentence>"}]}
+{"clauses":[{"id":<int>,"risk":"red|yellow|green","plain":"<your paraphrase, never the original wording>","why":"<one sentence>"}]}
 
 Example input:
-[1] Tenant agrees to binding arbitration and waives the right to a jury trial.
+[1] Tenant agrees to binding arbitration and waives the right to a jury trial for any dispute arising under this lease.
 [2] Rent is due on the first of each month.
+[3] The Landlord may, at its discretion, choose to mediate disputes informally before filing suit.
+[4] Tenant agrees to indemnify and hold Landlord harmless from any claim, including those arising from Landlord's own negligence.
 
 Example output:
-{"clauses":[{"id":1,"risk":"red","plain":"You give up the right to sue in court if there is a dispute.","why":"Binding arbitration plus a jury trial waiver removes your strongest legal protections."},{"id":2,"risk":"green","plain":"Rent is due monthly on the 1st.","why":"Standard payment term in any lease."}]}
+{"clauses":[{"id":1,"risk":"red","plain":"You give up the right to take any dispute to court and must instead use a private arbitrator.","why":"Ask whether arbitration is opt-in or mandatory, who selects the arbitrator, and who pays the fees — these terms are often negotiable before signing."},{"id":2,"risk":"green","plain":"Your rent payment is owed at the start of every month.","why":"Standard term, no action needed."},{"id":3,"risk":"green","plain":"The landlord can choose to try mediation first but does not have to.","why":"Standard term, no action needed."},{"id":4,"risk":"red","plain":"You promise to pay the landlord's legal costs and damages, even when the landlord caused the problem.","why":"Push back on indemnifying the other party for their own negligence — most jurisdictions treat this as overreach and it can be removed."}]}
 
 Now classify these clauses:
 $numbered
@@ -143,32 +187,91 @@ $numbered
   }
 
   private fun parseResponse(raw: String, blocks: List<SettleTextBlock>): List<ClauseResult> {
-    return try {
-      val json = extractFirstJsonObject(raw) ?: return KeywordClassifier.classify(blocks)
-      val arr = JSONObject(json).getJSONArray("clauses")
-      val results = mutableListOf<ClauseResult>()
-      for (i in 0 until arr.length()) {
-        val item = arr.getJSONObject(i)
-        results +=
-          ClauseResult(
-            id = item.getInt("id"),
-            risk =
-              when (item.optString("risk").lowercase()) {
-                "red" -> Risk.RED
-                "yellow" -> Risk.YELLOW
-                "green" -> Risk.GREEN
-                else -> Risk.UNKNOWN
-              },
-            plain = item.optString("plain", ""),
-            why = item.optString("why", ""),
-          )
+    // Try strict JSON first (cleanest path when the model emits well-formed output).
+    val strict =
+      try {
+        val json = extractFirstJsonObject(raw) ?: ""
+        if (json.isNotEmpty()) {
+          val arr = JSONObject(json).getJSONArray("clauses")
+          val out = mutableListOf<ClauseResult>()
+          for (i in 0 until arr.length()) {
+            val item = arr.getJSONObject(i)
+            out += clauseFrom(item.getInt("id"), item.optString("risk"), item.optString("plain"), item.optString("why"))
+          }
+          out
+        } else emptyList()
+      } catch (e: Exception) {
+        Log.w(TAG, "Strict JSON parse failed, will try lenient extractor", e)
+        emptyList<ClauseResult>()
       }
-      val seen = results.map { it.id }.toSet()
-      results + KeywordClassifier.classify(blocks.filter { it.id !in seen })
-    } catch (e: Exception) {
-      Log.e(TAG, "Parse failed: $raw", e)
-      KeywordClassifier.classify(blocks)
+
+    // Lenient pass: pull each clause via field-marker regex. Gemma frequently emits unescaped
+    // double quotes inside string values (e.g. ourselves as "we" or "our") which org.json rejects
+    // even though the per-clause shape is recognizable. Anchor on field names rather than treating
+    // double quotes as string boundaries.
+    val lenient = if (strict.isEmpty()) extractClausesLenient(raw) else strict
+
+    // Token-budget optimization: the prompt instructs the LLM to OMIT green clauses, but it
+    // sometimes emits them anyway. Drop green / unknown so the UI only highlights red/yellow.
+    val filtered = lenient.filter { it.risk == Risk.RED || it.risk == Risk.YELLOW }
+
+    // If we still have nothing the model said anything about, fall back so the user sees *some*
+    // signal instead of an unannotated page.
+    if (filtered.isEmpty() && lenient.isEmpty()) {
+      Log.e(TAG, "Parse produced no clauses, falling back to keyword classifier. Raw: $raw")
+      return KeywordClassifier.classify(blocks)
     }
+    return filtered
+  }
+
+  private fun clauseFrom(id: Int, risk: String, plain: String, why: String): ClauseResult =
+    ClauseResult(
+      id = id,
+      risk =
+        when (risk.lowercase().trim()) {
+          "red" -> Risk.RED
+          "yellow" -> Risk.YELLOW
+          "green" -> Risk.GREEN
+          else -> Risk.UNKNOWN
+        },
+      plain = plain,
+      why = why,
+    )
+
+  /**
+   * Hand-rolled lenient extractor: anchor on `"id":N`, `"risk":"…"`, `"plain":"…` and `"why":"…`
+   * markers and slice values between them. Tolerates unescaped double quotes inside the plain/why
+   * field values (a common Gemma quirk — e.g. plain text containing "we" or "our") that strict
+   * JSON would reject.
+   */
+  private fun extractClausesLenient(raw: String): List<ClauseResult> {
+    val out = mutableListOf<ClauseResult>()
+    val idMatches = Regex("\"id\"\\s*:\\s*(\\d+)").findAll(raw).toList()
+    for (i in idMatches.indices) {
+      val start = idMatches[i].range.first
+      val end = if (i + 1 < idMatches.size) idMatches[i + 1].range.first else raw.length
+      val chunk = raw.substring(start, end)
+      val id = idMatches[i].groupValues[1].toIntOrNull() ?: continue
+      val risk =
+        Regex("\"risk\"\\s*:\\s*\"(red|yellow|green)\"", RegexOption.IGNORE_CASE)
+          .find(chunk)
+          ?.groupValues
+          ?.getOrNull(1) ?: ""
+      val plain = sliceValue(chunk, "\"plain\":\"", listOf("\",\"why\"", "\",\"id\"", "\"}")) ?: ""
+      val why = sliceValue(chunk, "\"why\":\"", listOf("\"}", "\",\"id\"")) ?: ""
+      out += clauseFrom(id, risk, plain, why)
+    }
+    return out
+  }
+
+  private fun sliceValue(chunk: String, startMarker: String, endMarkers: List<String>): String? {
+    val s = chunk.indexOf(startMarker)
+    if (s == -1) return null
+    val valueStart = s + startMarker.length
+    val nearestEnd =
+      endMarkers.mapNotNull { m -> chunk.indexOf(m, valueStart).takeIf { it >= 0 } }.minOrNull()
+        ?: return chunk.substring(valueStart)
+    return chunk.substring(valueStart, nearestEnd)
   }
 
   /**

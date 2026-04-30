@@ -13,6 +13,8 @@ import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -226,7 +228,12 @@ private fun ClauseDetailSheet(
     }
 
   ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
-    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp)) {
+    Column(
+      modifier =
+        Modifier.fillMaxWidth()
+          .verticalScroll(rememberScrollState())
+          .padding(horizontal = 24.dp, vertical = 8.dp)
+    ) {
       Row(verticalAlignment = Alignment.CenterVertically) {
         Box(modifier = Modifier.size(14.dp).background(badgeColor, CircleShape))
         Spacer(Modifier.width(8.dp))

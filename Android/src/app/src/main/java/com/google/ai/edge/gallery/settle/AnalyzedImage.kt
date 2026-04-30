@@ -58,9 +58,15 @@ fun AnalyzedImage(
       contentScale = ContentScale.Fit,
     )
 
+    // Token-budget optimization: only blocks the LLM actually returned (red/yellow) are
+    // renderable. Greens and other omitted ids are skipped from both drawing AND tap detection.
+    // To restore highlights for every block, replace `renderable` with `blocks` in both the
+    // tap-detection lookup and the draw loop below.
+    val renderable = blocks.filter { resultById[it.id] != null }
+
     Canvas(
       modifier =
-        Modifier.fillMaxSize().pointerInput(blocks, results) {
+        Modifier.fillMaxSize().pointerInput(renderable, results) {
           detectTapGestures { tap ->
             val callback = onBlockTap ?: return@detectTapGestures
             if (scale <= 0f) return@detectTapGestures
@@ -68,7 +74,7 @@ fun AnalyzedImage(
             val bmpY = (tap.y - offsetY) / scale
             // Walk in reverse so a smaller block on top of a larger one wins.
             val hit =
-              blocks.lastOrNull { block ->
+              renderable.lastOrNull { block ->
                 val r = block.boundingBox
                 bmpX >= r.left && bmpX <= r.right && bmpY >= r.top && bmpY <= r.bottom
               }
@@ -76,7 +82,7 @@ fun AnalyzedImage(
           }
         }
     ) {
-      blocks.forEach { block ->
+      renderable.forEach { block ->
         val rect = block.boundingBox
         val left = rect.left * scale + offsetX
         val top = rect.top * scale + offsetY
