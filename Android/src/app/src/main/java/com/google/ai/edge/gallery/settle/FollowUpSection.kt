@@ -24,7 +24,11 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -76,14 +80,11 @@ fun FollowUpSection(
     }
 
     Row(verticalAlignment = Alignment.Bottom) {
-      OutlinedTextField(
+      SlimQuestionField(
         value = input,
         onValueChange = { input = it },
-        placeholder = { Text("e.g. What if I break this early?") },
-        modifier = Modifier.weight(1f),
         enabled = analyzerReady && !streaming,
-        singleLine = false,
-        maxLines = 3,
+        modifier = Modifier.weight(1f),
       )
       Spacer(Modifier.width(8.dp))
       IconButton(
@@ -129,6 +130,65 @@ fun FollowUpSection(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
       )
     }
+  }
+}
+
+/**
+ * Outlined text field rendered with bodyMedium typography and tighter content padding so it
+ * matches the description text size used elsewhere in the bottom sheet (under "What this means"
+ * and "Why this matters") while staying visually proportional — same rounded outline, just
+ * thinner and smaller text.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SlimQuestionField(
+  value: String,
+  onValueChange: (String) -> Unit,
+  enabled: Boolean,
+  modifier: Modifier = Modifier,
+) {
+  val interactionSource = remember { MutableInteractionSource() }
+  val textStyle =
+    MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface)
+  val shape = RoundedCornerShape(12.dp)
+  BasicTextField(
+    value = value,
+    onValueChange = onValueChange,
+    enabled = enabled,
+    textStyle = textStyle,
+    cursorBrush =
+      androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary),
+    interactionSource = interactionSource,
+    singleLine = false,
+    maxLines = 3,
+    modifier = modifier,
+  ) { innerTextField ->
+    OutlinedTextFieldDefaults.DecorationBox(
+      value = value,
+      innerTextField = innerTextField,
+      enabled = enabled,
+      singleLine = false,
+      visualTransformation = androidx.compose.ui.text.input.VisualTransformation.None,
+      interactionSource = interactionSource,
+      placeholder = {
+        Text(
+          text = "e.g. What if I break this early?",
+          style = MaterialTheme.typography.bodyMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      },
+      // Tighter padding than the default (16dp horizontal / 16dp vertical) so the field is
+      // proportionally thinner, matching bodyMedium's smaller text size.
+      contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+      container = {
+        OutlinedTextFieldDefaults.Container(
+          enabled = enabled,
+          isError = false,
+          interactionSource = interactionSource,
+          shape = shape,
+        )
+      },
+    )
   }
 }
 
