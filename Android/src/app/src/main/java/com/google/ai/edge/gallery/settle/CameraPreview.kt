@@ -90,6 +90,11 @@ fun CameraPreview(modifier: Modifier = Modifier, controller: CameraController) {
       // fill the view and the captured image looks "wider" than what was on-screen.
       scaleType = PreviewView.ScaleType.FIT_CENTER
       implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+      // The PreviewView fills its parent and the FIT_CENTER scale type leaves bezels around
+      // the actual camera frame. Those bezels render with the PreviewView's own background
+      // (default black), so set it to white directly here — a wrapping Compose background
+      // wouldn't be visible through the PreviewView.
+      setBackgroundColor(android.graphics.Color.WHITE)
     }
   }
 
