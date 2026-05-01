@@ -165,17 +165,23 @@ private fun CameraStage() {
     val bitmap = capturedBitmap
     if (bitmap == null) {
       CameraPreview(modifier = Modifier.fillMaxSize(), controller = controller)
-      Button(
-        onClick = {
-          controller.takePicture(
-            context = context,
-            onCapture = { capturedBitmap = it },
-            onError = { Log.e(TAG, "Capture failed", it) },
-          )
-        },
-        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 48.dp),
+      // Center the Analyze button vertically inside a fixed-height bottom band so it sits in
+      // the middle of the margin below the camera preview rather than pinned to the screen edge.
+      Box(
+        modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(220.dp),
+        contentAlignment = Alignment.Center,
       ) {
-        Text("Analyze")
+        Button(
+          onClick = {
+            controller.takePicture(
+              context = context,
+              onCapture = { capturedBitmap = it },
+              onError = { Log.e(TAG, "Capture failed", it) },
+            )
+          }
+        ) {
+          Text("Analyze")
+        }
       }
     } else {
       val resultById = remember(results) { results.associateBy { it.id } }
@@ -196,11 +202,11 @@ private fun CameraStage() {
         // While the LLM works, sweep a horizontal scan line across the captured frame.
         ScanLineOverlay(modifier = Modifier.fillMaxSize())
       }
-      Button(
-        onClick = ::resetCapture,
-        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 48.dp),
+      Box(
+        modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(220.dp),
+        contentAlignment = Alignment.Center,
       ) {
-        Text("Scan again")
+        Button(onClick = ::resetCapture) { Text("Scan again") }
       }
     }
 
@@ -366,7 +372,7 @@ private fun ClauseDetailSheet(
       Text(
         text = "What this means",
         style = MaterialTheme.typography.titleMedium,
-        fontWeight = FontWeight.SemiBold,
+        fontWeight = FontWeight.Bold,
       )
       Spacer(Modifier.height(4.dp))
       Text(
@@ -377,7 +383,7 @@ private fun ClauseDetailSheet(
       Text(
         text = "Why this matters",
         style = MaterialTheme.typography.titleMedium,
-        fontWeight = FontWeight.SemiBold,
+        fontWeight = FontWeight.Bold,
       )
       Spacer(Modifier.height(4.dp))
       Text(

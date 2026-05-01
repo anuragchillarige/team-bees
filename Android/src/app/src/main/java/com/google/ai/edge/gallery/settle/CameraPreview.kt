@@ -18,6 +18,7 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -94,9 +95,11 @@ fun CameraPreview(modifier: Modifier = Modifier, controller: CameraController) {
 
   Box(
     modifier =
-      modifier.pointerInput(controller) {
-        detectTransformGestures { _, _, zoom, _ -> controller.applyPinchZoom(zoom) }
-      }
+      modifier
+        .background(androidx.compose.ui.graphics.Color.White)
+        .pointerInput(controller) {
+          detectTransformGestures { _, _, zoom, _ -> controller.applyPinchZoom(zoom) }
+        }
   ) {
     AndroidView(
       modifier = Modifier.fillMaxSize(),

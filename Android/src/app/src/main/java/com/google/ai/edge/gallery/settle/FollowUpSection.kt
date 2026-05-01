@@ -36,6 +36,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 
@@ -61,9 +62,11 @@ fun FollowUpSection(
 
   Column(modifier = modifier.fillMaxWidth()) {
     HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+    Spacer(Modifier.height(16.dp))
     Text(
       text = "Ask about this clause",
       style = MaterialTheme.typography.titleMedium,
+      fontWeight = FontWeight.Bold,
     )
     Spacer(Modifier.height(8.dp))
 
