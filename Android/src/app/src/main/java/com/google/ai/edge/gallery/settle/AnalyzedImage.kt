@@ -12,8 +12,11 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
@@ -51,83 +54,80 @@ fun AnalyzedImage(
     }
   }
 
-  BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+  BoxWithConstraints(modifier = modifier) {
     val density = LocalDensity.current
     val viewWidthPx = with(density) { maxWidth.toPx() }
-    val viewHeightPx = with(density) { maxHeight.toPx() }
     val bmpWidth = bitmap.width.toFloat()
     val bmpHeight = bitmap.height.toFloat()
-    val scale =
-      if (bmpWidth > 0f && bmpHeight > 0f) {
-        minOf(viewWidthPx / bmpWidth, viewHeightPx / bmpHeight)
-      } else {
-        1f
-      }
-    val offsetX = (viewWidthPx - bmpWidth * scale) / 2f
-    val offsetY = (viewHeightPx - bmpHeight * scale) / 2f
-    val strokeWidthPx = with(density) { 1.5.dp.toPx() }
+    
+    // Calculate scale and height based on the width to preserve aspect ratio
+    val scale = if (bmpWidth > 0f) viewWidthPx / bmpWidth else 1f
+    val heightPx = bmpHeight * scale
+    val heightDp = with(density) { heightPx.toDp() }
 
-    Image(
-      bitmap = bitmap.asImageBitmap(),
-      contentDescription = "Captured document",
-      modifier = Modifier.fillMaxSize(),
-      contentScale = ContentScale.Fit,
-    )
+    Box(
+      modifier = Modifier
+        .width(maxWidth)
+        .height(heightDp)
+    ) {
+      val strokeWidthPx = with(density) { 1.5.dp.toPx() }
 
-    // Token-budget optimization: only blocks the LLM actually returned (red/yellow) are
-    // renderable. Greens and other omitted ids are skipped from both drawing AND tap detection.
-    // To restore highlights for every block, replace `renderable` with `blocks` in both the
-    // tap-detection lookup and the draw loop below.
-    val renderable = blocks.filter { resultById[it.id] != null }
+      Image(
+        bitmap = bitmap.asImageBitmap(),
+        contentDescription = "Captured document",
+        modifier = Modifier.fillMaxSize(),
+        contentScale = ContentScale.FillWidth,
+      )
 
-    Canvas(
-      modifier =
-        Modifier.fillMaxSize().pointerInput(renderable, results) {
-          detectTapGestures { tap ->
-            val callback = onBlockTap ?: return@detectTapGestures
-            if (scale <= 0f) return@detectTapGestures
-            val bmpX = (tap.x - offsetX) / scale
-            val bmpY = (tap.y - offsetY) / scale
-            // Walk in reverse so a smaller block on top of a larger one wins.
-            val hit =
-              renderable.lastOrNull { block ->
-                val r = block.boundingBox
-                bmpX >= r.left && bmpX <= r.right && bmpY >= r.top && bmpY <= r.bottom
+      // Token-budget optimization: only blocks the LLM actually returned (red/yellow) are
+      // renderable. Greens and other omitted ids are skipped from both drawing AND tap detection.
+      val renderable = blocks.filter { resultById[it.id] != null }
+
+      Canvas(
+        modifier =
+          Modifier.fillMaxSize().pointerInput(renderable, results) {
+            detectTapGestures { tap ->
+              val callback = onBlockTap ?: return@detectTapGestures
+              val bmpX = tap.x / scale
+              val bmpY = tap.y / scale
+              // Walk in reverse so a smaller block on top of a larger one wins.
+              val hit =
+                renderable.lastOrNull { block ->
+                  val r = block.boundingBox
+                  bmpX >= r.left && bmpX <= r.right && bmpY >= r.top && bmpY <= r.bottom
+                }
+              if (hit != null) {
+                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                callback(hit)
               }
-            if (hit != null) {
-              haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-              callback(hit)
             }
           }
+      ) {
+        val progress = fadeIn.value
+        renderable.forEach { block ->
+          val rect = block.boundingBox
+          val left = rect.left * scale
+          val top = rect.top * scale
+          val width = rect.width() * scale
+          val height = rect.height() * scale
+          val topLeft = Offset(left, top)
+          val size = Size(width, height)
+          val risk = resultById[block.id]?.risk ?: Risk.UNKNOWN
+          val baseColor =
+            when (risk) {
+              Risk.RED -> Color.Red
+              Risk.YELLOW -> Color(0xFFFFC107)
+              Risk.GREEN -> Color(0xFF4CAF50)
+              Risk.UNKNOWN -> Color.Gray
+            }
+          drawRect(color = baseColor.copy(alpha = 0.3f * progress), topLeft = topLeft, size = size)
+          drawRect(
+            color = baseColor.copy(alpha = progress),
+            topLeft = topLeft,
+            size = size,
+            style = Stroke(width = strokeWidthPx),
+          )
         }
-    ) {
-      val progress = fadeIn.value
-      renderable.forEach { block ->
-        val rect = block.boundingBox
-        val left = rect.left * scale + offsetX
-        val top = rect.top * scale + offsetY
-        val width = rect.width() * scale
-        val height = rect.height() * scale
-        val topLeft = Offset(left, top)
-        val size = Size(width, height)
-        val risk = resultById[block.id]?.risk ?: Risk.UNKNOWN
-        val baseColor =
-          when (risk) {
-            Risk.RED -> Color.Red
-            Risk.YELLOW -> Color(0xFFFFC107)
-            Risk.GREEN -> Color(0xFF4CAF50)
-            Risk.UNKNOWN -> Color.Gray
-          }
-        // Filled translucent body so the highlight is visible. Multiply by the fade-in progress
-        // so highlights ease in after classification rather than popping.
-        drawRect(color = baseColor.copy(alpha = 0.3f * progress), topLeft = topLeft, size = size)
-        // Crisp outline on top for definition.
-        drawRect(
-          color = baseColor.copy(alpha = progress),
-          topLeft = topLeft,
-          size = size,
-          style = Stroke(width = strokeWidthPx),
-        )
       }
     }
   }

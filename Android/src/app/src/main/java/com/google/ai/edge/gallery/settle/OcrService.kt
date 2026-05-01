@@ -15,16 +15,22 @@ import kotlinx.coroutines.tasks.await
 class OcrService {
   private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
-  suspend fun extractBlocks(bitmap: Bitmap): List<SettleTextBlock> {
+  suspend fun extractBlocks(
+    bitmap: Bitmap,
+    pageIndex: Int = 0,
+    startId: Int = 1,
+  ): Pair<List<SettleTextBlock>, Int> {
     val image = InputImage.fromBitmap(bitmap, 0) // bitmap already rotated in Slice 1
     val result = recognizer.process(image).await()
-    var nextId = 1
-    return result.textBlocks.mapNotNull { block ->
-      val rect = block.boundingBox ?: return@mapNotNull null
-      val text = block.text
-      if (!isLikelyClause(text)) return@mapNotNull null
-      SettleTextBlock(id = nextId++, text = text, boundingBox = rect)
-    }
+    var nextId = startId
+    val extracted =
+      result.textBlocks.mapNotNull { block ->
+        val rect = block.boundingBox ?: return@mapNotNull null
+        val text = block.text
+        if (!isLikelyClause(text)) return@mapNotNull null
+        SettleTextBlock(id = nextId++, text = text, boundingBox = rect, pageIndex = pageIndex)
+      }
+    return extracted to nextId
   }
 
   /**
@@ -38,13 +44,13 @@ class OcrService {
     if (text.isEmpty()) return false
 
     // Sentence-like prose tends to be at least this long.
-    if (text.length < 40) return false
+    if (text.length < 25) return false
 
     val wordCount = text.split(Regex("\\s+")).size
-    if (wordCount < 6) return false
+    if (wordCount < 4) return false
 
-    // A genuine clause has at least one sentence terminator somewhere in it.
-    val hasSentenceTerminator = text.any { it == '.' || it == '!' || it == '?' }
+    // A genuine clause usually has at least one sentence terminator.
+    val hasSentenceTerminator = text.any { it == '.' || it == '!' || it == '?' || it == ';' || it == ':' }
     if (!hasSentenceTerminator) return false
 
     // ALL-CAPS short blocks are almost always headings/section labels.

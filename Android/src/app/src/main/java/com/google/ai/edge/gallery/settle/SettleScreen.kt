@@ -12,6 +12,7 @@ import android.graphics.Bitmap
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import kotlinx.coroutines.launch
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -37,6 +38,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -50,6 +52,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -99,17 +102,57 @@ fun SettleScreen() {
 @Composable
 private fun CameraStage() {
   val context = LocalContext.current
-  var capturedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+  var capturedPages by remember { mutableStateOf<List<Bitmap>>(emptyList()) }
   var blocks by remember { mutableStateOf<List<SettleTextBlock>>(emptyList()) }
   var results by remember { mutableStateOf<List<ClauseResult>>(emptyList()) }
   var ocrComplete by remember { mutableStateOf(false) }
   var classifying by remember { mutableStateOf(false) }
+  var loading by remember { mutableStateOf(false) }
   var selectedClause by
     remember { mutableStateOf<Pair<SettleTextBlock, ClauseResult?>?>(null) }
   val controller = remember { CameraController() }
   val ocr = remember { OcrService() }
   val analyzer = remember { SettleAnalyzer(context) }
   var analyzerReady by remember { mutableStateOf(false) }
+  val scope = rememberCoroutineScope()
+
+  val uploadLauncher =
+    rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+      if (uri == null) return@rememberLauncherForActivityResult
+      val mimeType = context.contentResolver.getType(uri)
+      loading = true
+      scope.launch {
+        try {
+          if (mimeType == "application/pdf") {
+            // Process PDF page by page to avoid huge bitmaps
+            val renderer = FileLoader.openPdfRenderer(context, uri)
+            renderer.use { r ->
+              val allBlocks = mutableListOf<SettleTextBlock>()
+              val allPages = mutableListOf<Bitmap>()
+              var currentId = 1
+              for (i in 0 until r.pageCount) {
+                val pageBmp = FileLoader.renderPdfPage(r, i)
+                allPages.add(pageBmp)
+                
+                val (pageBlocks, nextId) = ocr.extractBlocks(pageBmp, pageIndex = i, startId = currentId)
+                allBlocks.addAll(pageBlocks)
+                currentId = nextId
+              }
+              capturedPages = allPages
+              blocks = allBlocks
+              ocrComplete = true
+            }
+          } else {
+            val bmp = FileLoader.loadBitmap(context, uri, mimeType)
+            capturedPages = listOf(bmp)
+          }
+        } catch (e: Exception) {
+          Log.e(TAG, "File load failed", e)
+        } finally {
+          loading = false
+        }
+      }
+    }
 
   LaunchedEffect(Unit) {
     val modelFile = File(context.getExternalFilesDir(null), "settle/$MODEL_FILENAME")
@@ -128,16 +171,16 @@ private fun CameraStage() {
 
   DisposableEffect(Unit) { onDispose { analyzer.close() } }
 
-  LaunchedEffect(capturedBitmap) {
-    val bmp = capturedBitmap ?: return@LaunchedEffect
-    blocks =
-      try {
-        ocr.extractBlocks(bmp)
-      } catch (e: Exception) {
-        Log.e(TAG, "OCR failed", e)
-        emptyList()
-      }
-    ocrComplete = true
+  LaunchedEffect(capturedPages) {
+    if (capturedPages.isEmpty()) return@LaunchedEffect
+    // If it's not a PDF (captured from camera or single image upload), we still need OCR.
+    // For PDF upload, OCR is already done in the launcher.
+    if (!ocrComplete) {
+      val (allBlocks, _) = ocr.extractBlocks(capturedPages.first())
+      blocks = allBlocks
+      ocrComplete = true
+    }
+    loading = false
   }
 
   LaunchedEffect(blocks) {
@@ -153,17 +196,18 @@ private fun CameraStage() {
   }
 
   fun resetCapture() {
-    capturedBitmap = null
+    capturedPages.forEach { it.recycle() }
+    capturedPages = emptyList()
     blocks = emptyList()
     results = emptyList()
     ocrComplete = false
     classifying = false
+    loading = false
     selectedClause = null
   }
 
   Box(modifier = Modifier.fillMaxSize()) {
-    val bitmap = capturedBitmap
-    if (bitmap == null) {
+    if (capturedPages.isEmpty()) {
       CameraPreview(modifier = Modifier.fillMaxSize(), controller = controller)
       // Center the Analyze button vertically inside a fixed-height bottom band so it sits in
       // the middle of the margin below the camera preview rather than pinned to the screen edge.
@@ -171,31 +215,87 @@ private fun CameraStage() {
         modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(220.dp),
         contentAlignment = Alignment.Center,
       ) {
-        Button(
-          onClick = {
-            controller.takePicture(
-              context = context,
-              onCapture = { capturedBitmap = it },
-              onError = { Log.e(TAG, "Capture failed", it) },
+        Row(
+          horizontalArrangement = Arrangement.spacedBy(16.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Button(
+            enabled = !loading,
+            onClick = {
+              loading = true
+              controller.takePicture(
+                context = context,
+                onCapture = { capturedPages = listOf(it) },
+                onError = { Log.e(TAG, "Capture failed", it); loading = false },
+              )
+            }
+          ) {
+            Text("Scan")
+          }
+          Button(
+            enabled = !loading,
+            onClick = {
+              uploadLauncher.launch(
+                arrayOf(
+                  "application/pdf",
+                  "image/*",
+                  "text/plain",
+                  "application/rtf",
+                  "text/rtf",
+                  FileLoader.MIME_DOCX,
+                  FileLoader.MIME_ODT,
+                  "application/msword",
+                )
+              )
+            }
+          ) {
+            Text("Upload")
+          }
+        }
+      }
+      // Loading overlay: covers camera preview and blocks interaction while processing.
+      if (loading) {
+        Box(
+          modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f)),
+          contentAlignment = Alignment.Center,
+        ) {
+          Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+          ) {
+            CircularProgressIndicator(color = Color.White)
+            Text(
+              text = "Processing…",
+              color = Color.White,
+              style = MaterialTheme.typography.bodyMedium,
             )
           }
-        ) {
-          Text("Analyze")
         }
       }
     } else {
       val resultById = remember(results) { results.associateBy { it.id } }
-      AnalyzedImage(
-        bitmap = bitmap,
-        blocks = blocks,
-        results = results,
-        modifier = Modifier.fillMaxSize(),
-        onBlockTap = { block -> selectedClause = block to resultById[block.id] },
-      )
+      
+      // Scrollable list of pages
+      Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+        capturedPages.forEachIndexed { index, bitmap ->
+          Box(modifier = Modifier.fillMaxWidth()) {
+            AnalyzedImage(
+              bitmap = bitmap,
+              blocks = blocks.filter { it.pageIndex == index },
+              results = results,
+              modifier = Modifier.fillMaxWidth(),
+              onBlockTap = { block -> selectedClause = block to resultById[block.id] },
+            )
+          }
+        }
+        // Spacer for the bottom button
+        Spacer(Modifier.height(220.dp))
+      }
+
       // Edge case: OCR ran but found nothing meaningful in the photo.
       if (ocrComplete && blocks.isEmpty()) {
         EmptyTextOverlay(
-          onScanAgain = ::resetCapture,
+          onBack = ::resetCapture,
           modifier = Modifier.align(Alignment.Center).padding(horizontal = 24.dp),
         )
       } else if (classifying) {
@@ -206,7 +306,7 @@ private fun CameraStage() {
         modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(220.dp),
         contentAlignment = Alignment.Center,
       ) {
-        Button(onClick = ::resetCapture) { Text("Scan again") }
+        Button(onClick = ::resetCapture) { Text("Back") }
       }
     }
 
@@ -244,7 +344,7 @@ private fun DisclaimerBanner(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun EmptyTextOverlay(onScanAgain: () -> Unit, modifier: Modifier = Modifier) {
+private fun EmptyTextOverlay(onBack: () -> Unit, modifier: Modifier = Modifier) {
   Surface(
     modifier = modifier,
     shape = RoundedCornerShape(16.dp),
@@ -262,12 +362,12 @@ private fun EmptyTextOverlay(onScanAgain: () -> Unit, modifier: Modifier = Modif
       )
       Spacer(Modifier.height(6.dp))
       Text(
-        text = "Try better lighting or move closer.",
+        text = "Try a different file or a clearer scan.",
         style = MaterialTheme.typography.bodyMedium,
         textAlign = TextAlign.Center,
       )
       Spacer(Modifier.height(16.dp))
-      Button(onClick = onScanAgain) { Text("Scan again") }
+      Button(onClick = onBack) { Text("Back") }
     }
   }
 }
