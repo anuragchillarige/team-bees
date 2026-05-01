@@ -175,8 +175,7 @@ You are a careful legal-risk advisor. For each numbered clause, output an object
 ABSOLUTE RULE FOR "plain":
 The "plain" value MUST be your own paraphrase in everyday English. NEVER copy, quote, or echo the clause's wording. NEVER lightly reword it. If your "plain" sentence shares more than a couple of consecutive words with the original clause, you are violating this rule and must rewrite. Speak directly to the reader ("you ...") about what the clause actually does to them.
 
-WRONG (echoes the clause): clause = "Tenant agrees to binding arbitration and waives the right to a jury trial."  →  plain = "Tenant agrees to binding arbitration and waives the right to a jury t
-rial."
+WRONG (echoes the clause): clause = "Tenant agrees to binding arbitration and waives the right to a jury trial."  →  plain = "Tenant agrees to binding arbitration and waives the right to a jury trial."
 WRONG (light reword):       clause = "Tenant agrees to binding arbitration and waives the right to a jury trial."  →  plain = "The tenant agrees to arbitration and waives jury trial rights."
 RIGHT (true paraphrase):    clause = "Tenant agrees to binding arbitration and waives the right to a jury trial."  →  plain = "You give up the right to take any dispute to court and must instead use a private arbitrator."
 
