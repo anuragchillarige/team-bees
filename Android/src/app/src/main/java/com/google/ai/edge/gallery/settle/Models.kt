@@ -12,6 +12,7 @@ data class SettleTextBlock(
   val id: Int, // 1-indexed; used as LLM reference
   val text: String,
   val boundingBox: Rect, // pixel coordinates in source bitmap
+  val pageIndex: Int = 0,
 )
 
 enum class Risk {
