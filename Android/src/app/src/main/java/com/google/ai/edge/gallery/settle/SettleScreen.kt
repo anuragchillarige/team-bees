@@ -364,7 +364,7 @@ private fun ClauseDetailSheet(
       }
       Spacer(Modifier.height(20.dp))
       Text(
-        text = "Plain English",
+        text = "What this means",
         style = MaterialTheme.typography.titleMedium,
         fontWeight = FontWeight.SemiBold,
       )
