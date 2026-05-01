@@ -81,7 +81,7 @@ fun AnalyzedImage(
 
       // Token-budget optimization: only blocks the LLM actually returned (red/yellow) are
       // renderable. Greens and other omitted ids are skipped from both drawing AND tap detection.
-      val renderable = blocks.filter { resultById[it.id] != null }
+      val renderable = blocks.filter { resultById[it.id]?.risk.let { r -> r != null && r != Risk.GREEN } }
 
       Canvas(
         modifier =
@@ -105,6 +105,7 @@ fun AnalyzedImage(
       ) {
         val progress = fadeIn.value
         renderable.forEach { block ->
+          val risk = resultById[block.id]?.risk ?: Risk.UNKNOWN
           val rect = block.boundingBox
           val left = rect.left * scale
           val top = rect.top * scale
@@ -112,7 +113,6 @@ fun AnalyzedImage(
           val height = rect.height() * scale
           val topLeft = Offset(left, top)
           val size = Size(width, height)
-          val risk = resultById[block.id]?.risk ?: Risk.UNKNOWN
           val baseColor =
             when (risk) {
               Risk.RED -> Color.Red
