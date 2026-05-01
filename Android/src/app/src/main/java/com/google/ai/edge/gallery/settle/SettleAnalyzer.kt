@@ -146,7 +146,11 @@ class SettleAnalyzer(private val context: Context) {
     }
 
   private fun buildPrompt(blocks: List<SettleTextBlock>): String {
-    val capped = blocks.take(25) // protect KV cache
+    // Pick the 25 largest blocks (by bounding-box area) to protect the KV cache. Larger blocks
+    // are far more likely to contain substantive prose; small blocks tend to be page numbers,
+    // section labels, or trailing fragments that survived the OCR-side heading filter.
+    val capped =
+      blocks.sortedByDescending { it.boundingBox.width() * it.boundingBox.height() }.take(25)
     val numbered = capped.joinToString("\n") { "[${it.id}] ${it.text.replace("\n", " ").take(300)}" }
     return """
 You are a careful legal-risk advisor. For each numbered clause, output an object with: id, risk, plain, why.

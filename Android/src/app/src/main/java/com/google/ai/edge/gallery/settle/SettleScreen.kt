@@ -12,11 +12,17 @@ import android.graphics.Bitmap
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -26,10 +32,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -46,8 +53,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -56,6 +67,7 @@ import java.io.File
 
 private const val TAG = "SettleScreen"
 private const val MODEL_FILENAME = "gemma-4-E2B-it_qualcomm_sm8750.litertlm"
+private const val DISCLAIMER_TEXT = "Settle helps spot risks. This is not legal advice."
 
 @Composable
 fun SettleScreen() {
@@ -90,6 +102,7 @@ private fun CameraStage() {
   var capturedBitmap by remember { mutableStateOf<Bitmap?>(null) }
   var blocks by remember { mutableStateOf<List<SettleTextBlock>>(emptyList()) }
   var results by remember { mutableStateOf<List<ClauseResult>>(emptyList()) }
+  var ocrComplete by remember { mutableStateOf(false) }
   var classifying by remember { mutableStateOf(false) }
   var selectedClause by
     remember { mutableStateOf<Pair<SettleTextBlock, ClauseResult?>?>(null) }
@@ -124,6 +137,7 @@ private fun CameraStage() {
         Log.e(TAG, "OCR failed", e)
         emptyList()
       }
+    ocrComplete = true
   }
 
   LaunchedEffect(blocks) {
@@ -136,6 +150,15 @@ private fun CameraStage() {
     results =
       if (analyzerReady) analyzer.classifyBlocks(blocks) else KeywordClassifier.classify(blocks)
     classifying = false
+  }
+
+  fun resetCapture() {
+    capturedBitmap = null
+    blocks = emptyList()
+    results = emptyList()
+    ocrComplete = false
+    classifying = false
+    selectedClause = null
   }
 
   Box(modifier = Modifier.fillMaxSize()) {
@@ -163,22 +186,27 @@ private fun CameraStage() {
         modifier = Modifier.fillMaxSize(),
         onBlockTap = { block -> selectedClause = block to resultById[block.id] },
       )
-      if (classifying) {
-        AnalyzingOverlay(modifier = Modifier.align(Alignment.Center))
+      // Edge case: OCR ran but found nothing meaningful in the photo.
+      if (ocrComplete && blocks.isEmpty()) {
+        EmptyTextOverlay(
+          onScanAgain = ::resetCapture,
+          modifier = Modifier.align(Alignment.Center).padding(horizontal = 24.dp),
+        )
+      } else if (classifying) {
+        // While the LLM works, sweep a horizontal scan line across the captured frame.
+        ScanLineOverlay(modifier = Modifier.fillMaxSize())
       }
       Button(
-        onClick = {
-          capturedBitmap = null
-          blocks = emptyList()
-          results = emptyList()
-          classifying = false
-          selectedClause = null
-        },
+        onClick = ::resetCapture,
         modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 48.dp),
       ) {
         Text("Scan again")
       }
     }
+
+    // "Not legal advice" disclaimer banner pinned to the top of the screen so it's always visible
+    // regardless of which stage we're in (camera preview, analyzing, or analyzed image).
+    DisclaimerBanner(modifier = Modifier.align(Alignment.TopCenter))
   }
 
   selectedClause?.let { (block, result) ->
@@ -191,20 +219,97 @@ private fun CameraStage() {
 }
 
 @Composable
-private fun AnalyzingOverlay(modifier: Modifier = Modifier) {
+private fun DisclaimerBanner(modifier: Modifier = Modifier) {
   Surface(
-    modifier = modifier.padding(24.dp),
+    modifier = modifier.fillMaxWidth(),
+    color = MaterialTheme.colorScheme.tertiaryContainer,
+    contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+  ) {
+    Text(
+      text = DISCLAIMER_TEXT,
+      style = MaterialTheme.typography.bodySmall,
+      textAlign = TextAlign.Center,
+      modifier =
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).padding(top = 24.dp),
+    )
+  }
+}
+
+@Composable
+private fun EmptyTextOverlay(onScanAgain: () -> Unit, modifier: Modifier = Modifier) {
+  Surface(
+    modifier = modifier,
     shape = RoundedCornerShape(16.dp),
-    color = Color.Black.copy(alpha = 0.55f),
+    color = Color.Black.copy(alpha = 0.7f),
     contentColor = Color.White,
   ) {
-    Row(
-      modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
-      verticalAlignment = Alignment.CenterVertically,
+    Column(
+      modifier = Modifier.padding(horizontal = 24.dp, vertical = 20.dp),
+      horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-      CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(20.dp))
-      Spacer(Modifier.width(12.dp))
-      Text("Analyzing…", style = MaterialTheme.typography.bodyMedium)
+      Text(
+        text = "No text detected",
+        style = MaterialTheme.typography.titleMedium,
+        fontWeight = FontWeight.SemiBold,
+      )
+      Spacer(Modifier.height(6.dp))
+      Text(
+        text = "Try better lighting or move closer.",
+        style = MaterialTheme.typography.bodyMedium,
+        textAlign = TextAlign.Center,
+      )
+      Spacer(Modifier.height(16.dp))
+      Button(onClick = onScanAgain) { Text("Scan again") }
+    }
+  }
+}
+
+@Composable
+private fun ScanLineOverlay(modifier: Modifier = Modifier) {
+  val transition = rememberInfiniteTransition(label = "scanline")
+  val progress by
+    transition.animateFloat(
+      initialValue = 0f,
+      targetValue = 1f,
+      animationSpec =
+        infiniteRepeatable(
+          animation = tween(durationMillis = 1500, easing = LinearEasing),
+          repeatMode = RepeatMode.Restart,
+        ),
+      label = "scanline-progress",
+    )
+  val density = LocalDensity.current
+  BoxWithConstraints(modifier = modifier) {
+    val widthPx = with(density) { maxWidth.toPx() }
+    val heightPx = with(density) { maxHeight.toPx() }
+    val bandHeightPx = with(density) { 56.dp.toPx() }
+    Canvas(modifier = Modifier.fillMaxSize()) {
+      val centerY = progress * heightPx
+      val top = (centerY - bandHeightPx / 2f).coerceAtLeast(0f)
+      val brush =
+        Brush.verticalGradient(
+          colors =
+            listOf(
+              Color.Transparent,
+              Color(0x4DFFFFFF), // 30% white core
+              Color.Transparent,
+            ),
+          startY = top,
+          endY = top + bandHeightPx,
+        )
+      drawRect(brush = brush, topLeft = Offset(0f, top), size = Size(widthPx, bandHeightPx))
+    }
+    Surface(
+      modifier = Modifier.align(Alignment.TopCenter).padding(top = 80.dp),
+      shape = RoundedCornerShape(16.dp),
+      color = Color.Black.copy(alpha = 0.55f),
+      contentColor = Color.White,
+    ) {
+      Text(
+        text = "Analyzing…",
+        style = MaterialTheme.typography.bodyMedium,
+        modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+      )
     }
   }
 }
@@ -221,10 +326,10 @@ private fun ClauseDetailSheet(
   val risk = result?.risk ?: Risk.UNKNOWN
   val (badgeColor, badgeLabel) =
     when (risk) {
-      Risk.RED -> Color.Red to "HIGH RISK"
-      Risk.YELLOW -> Color(0xFFFFC107) to "CAUTION"
-      Risk.GREEN -> Color(0xFF4CAF50) to "STANDARD"
-      Risk.UNKNOWN -> Color.Gray to "UNKNOWN"
+      Risk.RED -> Color(0xFFC62828) to "HIGH RISK"
+      Risk.YELLOW -> Color(0xFFEF6C00) to "CAUTION"
+      Risk.GREEN -> Color(0xFF2E7D32) to "STANDARD"
+      Risk.UNKNOWN -> Color(0xFF555555) to "UNKNOWN"
     }
 
   ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
@@ -234,16 +339,26 @@ private fun ClauseDetailSheet(
           .verticalScroll(rememberScrollState())
           .padding(horizontal = 24.dp, vertical = 8.dp)
     ) {
-      Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(modifier = Modifier.size(14.dp).background(badgeColor, CircleShape))
-        Spacer(Modifier.width(8.dp))
-        Text(
-          text = badgeLabel,
-          style = MaterialTheme.typography.labelLarge,
-          fontWeight = FontWeight.SemiBold,
-        )
+      // Risk badge — filled Surface with rounded corners and contrasting text.
+      Surface(
+        color = badgeColor,
+        contentColor = Color.White,
+        shape = RoundedCornerShape(50),
+      ) {
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+        ) {
+          Box(modifier = Modifier.size(8.dp).background(Color.White, CircleShape))
+          Spacer(Modifier.width(8.dp))
+          Text(
+            text = badgeLabel,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+          )
+        }
       }
-      Spacer(Modifier.height(16.dp))
+      Spacer(Modifier.height(20.dp))
       Text(
         text = "Plain English",
         style = MaterialTheme.typography.titleMedium,
@@ -254,7 +369,7 @@ private fun ClauseDetailSheet(
         text = result?.plain?.takeIf { it.isNotBlank() } ?: "No summary available.",
         style = MaterialTheme.typography.bodyMedium,
       )
-      Spacer(Modifier.height(16.dp))
+      Spacer(Modifier.height(20.dp))
       Text(
         text = "Why this matters",
         style = MaterialTheme.typography.titleMedium,
@@ -265,7 +380,8 @@ private fun ClauseDetailSheet(
         text = result?.why?.takeIf { it.isNotBlank() } ?: "No rationale available.",
         style = MaterialTheme.typography.bodyMedium,
       )
-      Spacer(Modifier.height(16.dp))
+      Spacer(Modifier.height(20.dp))
+      // Original text collapsed by default per polish guidelines.
       TextButton(onClick = { showOriginal = !showOriginal }, contentPadding = PaddingZero) {
         Text(if (showOriginal) "Hide original text" else "Show original text")
       }
@@ -284,7 +400,15 @@ private fun ClauseDetailSheet(
           )
         }
       }
-      Spacer(Modifier.height(24.dp))
+      Spacer(Modifier.height(20.dp))
+      Text(
+        text = DISCLAIMER_TEXT,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center,
+        modifier = Modifier.fillMaxWidth(),
+      )
+      Spacer(Modifier.height(20.dp))
     }
   }
 }
