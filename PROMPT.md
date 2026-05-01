@@ -500,6 +500,267 @@ Already done by the human. Gemma-4-E2B-it NPU runs in the gallery's chat UI. No 
 
 ---
 
+## Slice 5.5 — Follow-up question input on tapped clauses
+
+**Objective**: When the user taps a highlighted clause on the document, the existing clause detail panel (the `ModalBottomSheet` that slides up from the bottom showing risk badge, plain English, and why-this-matters from Slice 3) gains a new section: a text input where the user can type a follow-up question about that specific clause and receive a streamed answer from the same on-device LLM. Visually similar to Gemini's follow-up input in Google Search results.
+
+**Why**: The base app classifies clauses but can't answer specific user questions like "what would happen if I broke this clause early?" or "is this enforceable in California?" Adding a follow-up input transforms Settle from a one-shot scanner into a conversational explainer for the exact clause the user cares about, without leaving the panel they just opened.
+
+### How this fits into the existing flow
+
+The user-facing flow after this slice:
+
+1. User points the camera at a document and taps Analyze (existing, Slice 1–4).
+2. Colored highlights appear over risky clauses (existing, Slice 3–4).
+3. User taps a highlighted clause → the clause detail panel (`ModalBottomSheet`) slides up from the bottom of the screen showing the existing details (existing, Slice 3).
+4. **(NEW)** Below the existing details, the user sees an "Ask about this clause" section with a text input and send button.
+5. **(NEW)** User types a question, taps send. A bubble appears showing their question. Below it, the LLM's answer streams in chunk-by-chunk.
+6. **(NEW)** User can ask multiple follow-ups about the same clause; all Q&A pairs remain visible in the panel.
+7. User dismisses the panel by swiping down or tapping outside (existing).
+
+### Tasks
+
+1. **Read existing files first**:
+   - `settle/SettleAnalyzer.kt` — you'll be adding a new method here, not creating a new analyzer.
+   - `settle/SettleScreen.kt` — to understand how the clause detail panel (`ModalBottomSheet`) currently renders.
+   - `settle/Models.kt` — confirm the existing data classes; you'll add a small new one.
+   - The previously-read `LlmChatModelHelper.kt` — confirm whether `Conversation` instances support multiple sequential `sendMessageAsync` calls without re-initialization.
+
+2. **Decide conversation strategy**. Pick one of:
+   - **(A) Per-question fresh conversation**: each follow-up question creates a new `Conversation` with the clause text injected as context. Simpler, no state to manage, slightly slower per question.
+   - **(B) Single shared follow-up conversation**: reuse one `Conversation` instance separate from the classification one. Faster but risks context bleed between clauses.
+
+   **Use approach (A)** unless `LlmChatModelHelper.kt` shows the existing code reusing conversations across distinct queries — in which case match its pattern. Approach A is more predictable for a hackathon.
+
+3. **Extend `Models.kt`** with a new data class representing one question-and-answer pair within a clause's follow-up history. Place it below the existing classes:
+   ```kotlin
+   data class FollowUpExchange(
+       val question: String,
+       val answer: String,    // empty while streaming, filled as chunks arrive
+       val isLoading: Boolean // true while the LLM is still generating
+   )
+   ```
+   Do not modify `SettleTextBlock` or `ClauseResult`.
+
+4. **Add `askFollowUp` to `SettleAnalyzer.kt`**. New method, parallel structure to `classifyBlocks` but returns a `Flow<String>` of streaming text chunks rather than a parsed list:
+   ```kotlin
+   fun askFollowUp(clauseText: String, question: String): Flow<String> = flow {
+       val engine = engine ?: error("Analyzer not initialized")
+       val conversation = engine.createConversation()  // fresh per question
+       val prompt = buildFollowUpPrompt(clauseText, question)
+       try {
+           conversation.sendMessageAsync(
+               Message.user(Contents.of(Content.Text(prompt)))
+           ).collect { response ->
+               response.contents.contents
+                   .filterIsInstance<Content.Text>()
+                   .forEach { emit(it.text) }
+           }
+       } catch (e: Exception) {
+           Log.e("SettleAnalyzer", "Follow-up failed", e)
+           emit("\n\n[Unable to answer right now. Please try again.]")
+       } finally {
+           runCatching { conversation.close() }
+       }
+   }
+   ```
+   Adapt class/method names to match what `LlmChatModelHelper.kt` actually uses.
+
+5. **Implement `buildFollowUpPrompt`** as a private function in `SettleAnalyzer.kt`. The prompt should constrain the model to short, plain-English answers grounded in the specific clause text. Do not ask for JSON — this is a free-text answer.
+   ```kotlin
+   private fun buildFollowUpPrompt(clauseText: String, question: String): String {
+       return """
+   You are explaining a contract clause to a non-lawyer in plain English. Answer the user's specific question about the clause shown below. Keep your answer to 2-3 sentences. Do not give legal advice. Do not speculate about jurisdictions unless the user names one. If the question cannot be answered from the clause text alone, say so briefly.
+
+   The clause:
+   "${clauseText.take(600)}"
+
+   The user's question:
+   $question
+
+   Your answer:
+   """.trimIndent()
+   }
+   ```
+   The `.take(600)` cap on clause text prevents long clauses from exceeding the KV cache and leaves room for the question and answer.
+
+6. **Update the clause detail panel in `SettleScreen.kt`**. Locate the existing `ModalBottomSheet` block that renders when `selectedClause != null`. Add the new follow-up section **below** the existing "Why this matters" content but **above** the "Original text" expandable section. The follow-up section's internal state must reset when the user taps a different clause:
+   ```kotlin
+   selectedClause?.let { (block, result) ->
+       ModalBottomSheet(onDismissRequest = { selectedClause = null }) {
+           // ... existing risk badge ...
+           // ... existing "Plain English" section ...
+           // ... existing "Why this matters" section ...
+
+           FollowUpSection(
+               clauseText = block.text,
+               analyzer = analyzer,
+               analyzerReady = analyzerReady,
+               clauseId = block.id   // used as `key` to reset state on clause change
+           )
+
+           // ... existing "Original text" expandable section ...
+       }
+   }
+   ```
+
+7. **Create `settle/FollowUpSection.kt`** as a new composable file. This contains the input field, the send button, and the rendered list of past Q&A pairs for the currently-open clause:
+   ```kotlin
+   @Composable
+   fun FollowUpSection(
+       clauseText: String,
+       analyzer: SettleAnalyzer,
+       analyzerReady: Boolean,
+       clauseId: Int
+   ) {
+       // `clauseId` as the remember key ensures state resets when the user
+       // closes this panel and opens a different clause's panel.
+       var input by remember(clauseId) { mutableStateOf("") }
+       var exchanges by remember(clauseId) { mutableStateOf<List<FollowUpExchange>>(emptyList()) }
+       val scope = rememberCoroutineScope()
+       val keyboard = LocalSoftwareKeyboardController.current
+
+       Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+           HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+           Text("Ask about this clause", style = MaterialTheme.typography.titleSmall)
+           Spacer(Modifier.height(8.dp))
+
+           // Render prior Q&A pairs in chronological order
+           exchanges.forEach { exchange ->
+               FollowUpBubble(exchange)
+               Spacer(Modifier.height(8.dp))
+           }
+
+           // Input row: text field + send button
+           Row(verticalAlignment = Alignment.CenterVertically) {
+               OutlinedTextField(
+                   value = input,
+                   onValueChange = { input = it },
+                   placeholder = { Text("e.g. What if I break this early?") },
+                   modifier = Modifier.weight(1f),
+                   enabled = analyzerReady && exchanges.none { it.isLoading },
+                   singleLine = false,
+                   maxLines = 3
+               )
+               IconButton(
+                   onClick = {
+                       val q = input.trim()
+                       if (q.isEmpty() || !analyzerReady) return@IconButton
+                       input = ""
+                       keyboard?.hide()
+
+                       val newExchange = FollowUpExchange(question = q, answer = "", isLoading = true)
+                       exchanges = exchanges + newExchange
+                       val index = exchanges.lastIndex
+
+                       scope.launch {
+                           val buffer = StringBuilder()
+                           analyzer.askFollowUp(clauseText, q).collect { chunk ->
+                               buffer.append(chunk)
+                               exchanges = exchanges.toMutableList().also {
+                                   it[index] = it[index].copy(answer = buffer.toString())
+                               }
+                           }
+                           // Mark loading complete after stream finishes
+                           exchanges = exchanges.toMutableList().also {
+                               it[index] = it[index].copy(isLoading = false)
+                           }
+                       }
+                   },
+                   enabled = input.isNotBlank() && analyzerReady && exchanges.none { it.isLoading }
+               ) {
+                   Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+               }
+           }
+
+           if (!analyzerReady) {
+               Text(
+                   "AI not ready yet — follow-up questions will be available once the model loads.",
+                   style = MaterialTheme.typography.bodySmall,
+                   color = MaterialTheme.colorScheme.onSurfaceVariant
+               )
+           }
+       }
+   }
+
+   @Composable
+   private fun FollowUpBubble(exchange: FollowUpExchange) {
+       Column {
+           // The user's question — right-aligned bubble in primary color
+           Surface(
+               color = MaterialTheme.colorScheme.primaryContainer,
+               shape = RoundedCornerShape(12.dp),
+               modifier = Modifier.align(Alignment.End)
+           ) {
+               Text(
+                   exchange.question,
+                   modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                   style = MaterialTheme.typography.bodyMedium
+               )
+           }
+           Spacer(Modifier.height(4.dp))
+           // The LLM's answer — left-aligned bubble in surface variant
+           Surface(
+               color = MaterialTheme.colorScheme.surfaceVariant,
+               shape = RoundedCornerShape(12.dp)
+           ) {
+               Row(
+                   modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                   verticalAlignment = Alignment.CenterVertically
+               ) {
+                   if (exchange.answer.isEmpty() && exchange.isLoading) {
+                       CircularProgressIndicator(
+                           modifier = Modifier.size(16.dp),
+                           strokeWidth = 2.dp
+                       )
+                       Spacer(Modifier.width(8.dp))
+                       Text("Thinking…", style = MaterialTheme.typography.bodySmall)
+                   } else {
+                       Text(exchange.answer, style = MaterialTheme.typography.bodyMedium)
+                   }
+               }
+           }
+       }
+   }
+   ```
+   Adapt imports as needed.
+
+8. **Concurrency safety**. Two follow-up questions cannot run simultaneously because the `Engine` only supports one active conversation at a time. The `enabled` check on the send button (`exchanges.none { it.isLoading }`) prevents the user from submitting a second question while the first is streaming. **Do not remove this guard.** If a question is in flight when the user dismisses the panel, let it complete in the background — don't try to cancel mid-stream.
+
+9. **Handle panel dismissal during streaming**. If the user dismisses the clause detail panel while an answer is streaming, the coroutine in `scope.launch` will continue and try to update `exchanges`, but the composable is gone. This is harmless — the state update goes nowhere. Verify no crash occurs by tapping a clause, asking a question, and dismissing immediately. If a crash does occur, wrap the `scope.launch` body in a `try/catch` for `CancellationException`.
+
+10. **Edge cases to handle explicitly**:
+   - Empty input: send button is disabled (already handled).
+   - Analyzer not ready (Slice 4 fallback path active, LLM unavailable): show the "AI not ready yet" message and disable the input. Do not fall back to keyword-based answers — there's no good keyword-based answer to "what happens if I break this clause early?"
+   - LLM error during streaming: `askFollowUp` emits the error fallback string, which renders as the answer. No crash.
+   - Very long clause text: already capped by `.take(600)` in `buildFollowUpPrompt`.
+
+### Verification (perform these, then stop)
+
+- Capture a document, tap a red highlight, verify the clause detail panel opens with all the existing Slice 3 content (risk badge, plain English, why this matters) plus a **new "Ask about this clause" section** with an input and send button below.
+- Type a follow-up question (e.g., "what does this mean for me?") and tap send. Verify:
+   - The input clears.
+   - A bubble appears on the right side showing your question.
+   - A "Thinking…" indicator with a spinner appears in a bubble below the question.
+   - The answer streams in chunk-by-chunk in that bubble (visible text growth, not all-at-once appearance).
+   - The answer is grounded in the specific clause text, not a generic legal answer.
+- Send a second follow-up question on the same clause. Verify:
+   - Both Q&A pairs are visible in chronological order.
+   - The send button is disabled while the second answer streams.
+- Dismiss the panel (swipe down or tap outside), tap a different highlighted clause, and verify:
+   - The new clause's panel opens with a fresh input field.
+   - The previous clause's Q&A history is **not** visible — each clause's follow-ups are isolated.
+- Re-open the original clause's panel by tapping its highlight again. Either preserved history or fresh state is acceptable for a hackathon — just confirm no crash and no leakage of Q&A from a different clause.
+- Stress test dismissal: tap send, then immediately swipe down to dismiss the panel. No crash.
+- If the analyzer fell back to keyword classification (LLM not available), verify the input field is disabled and shows the "AI not ready yet" message.
+
+**End-of-slice action**:
+1. Run `./gradlew installDebug` and confirm success.
+2. Commit: `git commit -am "slice 5.5: follow-up question input on clauses"`
+3. Post the slice-completion summary (per Execution Rule 2) and **stop**. Do not start the next slice.
+
+
 ## Slice 6 — Demo prep
 
 **Objective**: Eliminate demo-day surprises.

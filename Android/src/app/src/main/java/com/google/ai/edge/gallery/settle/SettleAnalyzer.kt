@@ -20,6 +20,9 @@ import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.MessageCallback
 import kotlin.coroutines.resume
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -37,6 +40,11 @@ private const val TAG = "SettleAnalyzer"
 class SettleAnalyzer(private val context: Context) {
   private var engine: Engine? = null
   private var conversation: Conversation? = null
+  // The clause id that owns the current conversation's history (set by askFollowUp). Cleared on
+  // any reset (classification or first-turn follow-up). When a follow-up arrives whose clauseId
+  // matches this value, we reuse the conversation so the model can build on prior turns; otherwise
+  // we reset and re-inject the clause context as the first user message.
+  private var followUpClauseId: Int? = null
 
   suspend fun initialize(modelPath: String) =
     withContext(Dispatchers.IO) {
@@ -91,6 +99,12 @@ class SettleAnalyzer(private val context: Context) {
 
   private suspend fun resetConversation(eng: Engine): Conversation =
     withContext(Dispatchers.IO) {
+      // Cancel any in-flight inference first so close() doesn't race with active streaming.
+      try {
+        conversation?.cancelProcess()
+      } catch (e: Throwable) {
+        Log.w(TAG, "old conversation cancelProcess failed", e)
+      }
       try {
         conversation?.close()
       } catch (e: Throwable) {
@@ -105,6 +119,9 @@ class SettleAnalyzer(private val context: Context) {
           )
         )
       conversation = fresh
+      // Whatever owned the previous conversation no longer does. The next follow-up will need
+      // to re-inject clause context.
+      followUpClauseId = null
       fresh
     }
 
@@ -312,6 +329,107 @@ $numbered
       }
     }
     return null
+  }
+
+  /**
+   * Stream a free-text answer to a follow-up question grounded in [clauseText]. Each call creates
+   * its own [Conversation] so questions don't bleed context between clauses, and the
+   * conversation is closed after the answer completes (or fails). The send button in the UI must
+   * stay disabled while a stream is in flight — only one inference at a time.
+   */
+  fun askFollowUp(clauseId: Int, clauseText: String, question: String): Flow<String> =
+    callbackFlow {
+      val eng = engine
+      if (eng == null) {
+        trySend("[AI not ready yet — try again once the model has loaded.]")
+        close()
+        return@callbackFlow
+      }
+      // Reuse the conversation if this is a continuation of the same clause's Q&A — that way the
+      // model retains prior turns and can answer "what about my previous question?" properly.
+      // Reset the slot when the clause changes (or anything else has reset it, e.g. a fresh
+      // classification). The engine only allows one Conversation at a time, so we always go
+      // through the analyzer's single slot.
+      val sameClauseContinuation = (followUpClauseId == clauseId) && (conversation != null)
+      val conv =
+        if (sameClauseContinuation) {
+          conversation!!
+        } else {
+          try {
+            resetConversation(eng).also { followUpClauseId = clauseId }
+          } catch (e: Exception) {
+            Log.e(TAG, "follow-up resetConversation failed", e)
+            trySend("\n\n[Unable to answer right now. Please try again.]")
+            close()
+            return@callbackFlow
+          }
+        }
+
+    val callback =
+      object : MessageCallback {
+        override fun onMessage(message: Message) {
+          val text = message.toString()
+          if (!text.startsWith("<ctrl")) trySend(text)
+        }
+
+        override fun onDone() {
+          close()
+        }
+
+        override fun onError(throwable: Throwable) {
+          Log.e(TAG, "follow-up error", throwable)
+          trySend("\n\n[Unable to answer right now. Please try again.]")
+          close()
+        }
+      }
+
+      // First turn for this clause: include the clause + answering rules. Subsequent turns: just
+      // send the question; the model already has the clause and rules in conversation history.
+      val prompt =
+        if (sameClauseContinuation) buildFollowUpContinuationPrompt(question)
+        else buildFollowUpPrompt(clauseText, question)
+      try {
+        conv.sendMessageAsync(
+          Contents.of(listOf(Content.Text(prompt))),
+          callback,
+          emptyMap(),
+        )
+      } catch (e: Throwable) {
+        Log.e(TAG, "follow-up sendMessageAsync threw", e)
+        trySend("\n\n[Unable to answer right now. Please try again.]")
+        close()
+      }
+
+      awaitClose {
+        // Don't close the conversation here — it's owned by the analyzer's slot and will be reset
+        // by the next classification or follow-up call. Closing it here would race with future
+        // resetConversation calls.
+      }
+    }
+
+  private fun buildFollowUpContinuationPrompt(question: String): String =
+    "Continue answering follow-up questions about the same clause, following the same rules. " +
+      "Use prior turns in this conversation as context.\n\nThe user's next question:\n$question\n\nYour answer:"
+
+  private fun buildFollowUpPrompt(clauseText: String, question: String): String {
+    return """
+You are explaining a contract clause to a non-lawyer in plain English. Answer the user's specific question about the clause shown below. Keep your answer to 2–3 sentences.
+
+How to answer:
+- TRY YOUR BEST to give a useful answer. Use the clause text plus your general knowledge of how contracts of this type usually work. Reasonable inference is welcome.
+- Do NOT refuse just because the clause text alone doesn't spell something out — fill in with what is typical for this kind of contract.
+- Do not invent specific facts the clause cannot support (concrete dollar amounts, deadlines, named jurisdictions, etc.). If the question is truly unanswerable without information that only the document's author or counterparty would know (e.g., "what was their intent", "will they actually enforce this"), end your answer with: "For specifics, contact the person or company who gave you this document."
+- Do not speculate about jurisdictions unless the user names one. Do not give formal legal advice (the user already sees a 'not legal advice' disclaimer).
+
+The clause:
+"${clauseText.replace("\n", " ").take(600)}"
+
+The user's question:
+$question
+
+Your answer:
+"""
+      .trimIndent()
   }
 
   fun close() {

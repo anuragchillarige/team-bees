@@ -213,6 +213,8 @@ private fun CameraStage() {
     ClauseDetailSheet(
       block = block,
       result = result,
+      analyzer = analyzer,
+      analyzerReady = analyzerReady,
       onDismiss = { selectedClause = null },
     )
   }
@@ -319,6 +321,8 @@ private fun ScanLineOverlay(modifier: Modifier = Modifier) {
 private fun ClauseDetailSheet(
   block: SettleTextBlock,
   result: ClauseResult?,
+  analyzer: SettleAnalyzer,
+  analyzerReady: Boolean,
   onDismiss: () -> Unit,
 ) {
   val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -379,6 +383,15 @@ private fun ClauseDetailSheet(
       Text(
         text = result?.why?.takeIf { it.isNotBlank() } ?: "No rationale available.",
         style = MaterialTheme.typography.bodyMedium,
+      )
+      Spacer(Modifier.height(20.dp))
+      // Slice 5.5: free-text follow-up questions about the tapped clause. Streams answers from
+      // the same on-device LLM. Sits between "Why this matters" and the collapsible original.
+      FollowUpSection(
+        clauseText = block.text,
+        analyzer = analyzer,
+        analyzerReady = analyzerReady,
+        clauseId = block.id,
       )
       Spacer(Modifier.height(20.dp))
       // Original text collapsed by default per polish guidelines.

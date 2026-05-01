@@ -27,3 +27,10 @@ data class ClauseResult(
   val plain: String, // one-sentence summary in plain English
   val why: String, // one-sentence rationale
 )
+
+/** One question-and-answer pair within the follow-up history of a single tapped clause. */
+data class FollowUpExchange(
+  val question: String,
+  val answer: String, // empty while streaming; appended as chunks arrive
+  val isLoading: Boolean, // true while the LLM is still generating
+)
