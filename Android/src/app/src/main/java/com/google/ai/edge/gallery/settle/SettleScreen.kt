@@ -38,6 +38,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -106,6 +107,7 @@ private fun CameraStage() {
   var results by remember { mutableStateOf<List<ClauseResult>>(emptyList()) }
   var ocrComplete by remember { mutableStateOf(false) }
   var classifying by remember { mutableStateOf(false) }
+  var loading by remember { mutableStateOf(false) }
   var selectedClause by
     remember { mutableStateOf<Pair<SettleTextBlock, ClauseResult?>?>(null) }
   val controller = remember { CameraController() }
@@ -118,6 +120,7 @@ private fun CameraStage() {
     rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
       if (uri == null) return@rememberLauncherForActivityResult
       val mimeType = context.contentResolver.getType(uri)
+      loading = true
       scope.launch {
         try {
           if (mimeType == "application/pdf") {
@@ -145,6 +148,8 @@ private fun CameraStage() {
           }
         } catch (e: Exception) {
           Log.e(TAG, "File load failed", e)
+        } finally {
+          loading = false
         }
       }
     }
@@ -175,6 +180,7 @@ private fun CameraStage() {
       blocks = allBlocks
       ocrComplete = true
     }
+    loading = false
   }
 
   LaunchedEffect(blocks) {
@@ -196,6 +202,7 @@ private fun CameraStage() {
     results = emptyList()
     ocrComplete = false
     classifying = false
+    loading = false
     selectedClause = null
   }
 
@@ -213,17 +220,20 @@ private fun CameraStage() {
           verticalAlignment = Alignment.CenterVertically,
         ) {
           Button(
+            enabled = !loading,
             onClick = {
+              loading = true
               controller.takePicture(
                 context = context,
                 onCapture = { capturedPages = listOf(it) },
-                onError = { Log.e(TAG, "Capture failed", it) },
+                onError = { Log.e(TAG, "Capture failed", it); loading = false },
               )
             }
           ) {
             Text("Scan")
           }
           Button(
+            enabled = !loading,
             onClick = {
               uploadLauncher.launch(
                 arrayOf(
@@ -240,6 +250,25 @@ private fun CameraStage() {
             }
           ) {
             Text("Upload")
+          }
+        }
+      }
+      // Loading overlay: covers camera preview and blocks interaction while processing.
+      if (loading) {
+        Box(
+          modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.5f)),
+          contentAlignment = Alignment.Center,
+        ) {
+          Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+          ) {
+            CircularProgressIndicator(color = Color.White)
+            Text(
+              text = "Processing…",
+              color = Color.White,
+              style = MaterialTheme.typography.bodyMedium,
+            )
           }
         }
       }
